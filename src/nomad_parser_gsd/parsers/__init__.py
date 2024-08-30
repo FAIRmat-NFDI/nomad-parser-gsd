@@ -2,17 +2,18 @@ from nomad.config.models.plugins import ParserEntryPoint
 from pydantic import Field
 
 
-class NewParserEntryPoint(ParserEntryPoint):
+class GSDParserEntryPoint(ParserEntryPoint):
     parameter: int = Field(0, description='Custom configuration parameter')
 
     def load(self):
-        from nomad_parser_gsd.parsers.parser import NewParser
+        from nomad_parser_gsd.parsers.parser import GSDParser
 
-        return NewParser(**self.dict())
+        return GSDParser(**self.dict())
 
 
-parser_entry_point = NewParserEntryPoint(
-    name='NewParser',
-    description='New parser entry point configuration.',
-    mainfile_name_re='.*\.newmainfilename',
+parser_entry_point = GSDParserEntryPoint(
+    name='GSDParser',
+    description='Parser for the GSD file format, the native file format for HOOMD-blue. (https://gsd.readthedocs.io/en/v3.3.1/, https://glotzerlab.engin.umich.edu/hoomd-blue/)',
+    mainfile_name_re='.*\.gsd.*',
+    mainfile_contents_re=r'GSD version [\d\.]*',
 )
