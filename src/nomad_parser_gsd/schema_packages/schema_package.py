@@ -22,7 +22,7 @@ configuration = config.get_plugin_entry_point(
 m_package = SchemaPackage()
 
 
-class NewSchemaPackage(Schema):
+class GSDSchemaPackage(Schema):
     name = Quantity(
         type=str, a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity)
     )
@@ -31,7 +31,7 @@ class NewSchemaPackage(Schema):
     def normalize(self, archive: 'EntryArchive', logger: 'BoundLogger') -> None:
         super().normalize(archive, logger)
 
-        logger.info('NewSchema.normalize', parameter=configuration.parameter)
+        logger.info('GSDSchema.normalize', parameter=configuration.parameter)
         self.message = f'Hello {self.name}!'
 
 
