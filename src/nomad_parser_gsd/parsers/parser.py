@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Union, Iterable
 
+import numpy as np
+
 if TYPE_CHECKING:
     from nomad.datamodel.datamodel import (
         EntryArchive,
@@ -14,6 +16,7 @@ import os
 from nomad.datamodel.metainfo.workflow import Workflow
 from nomad.parsing.file_parser import FileParser
 import structlog
+from nomad.units import ureg
 # from nomad.parsing.parser import MatchingParser
 
 logging = structlog.get_logger()
@@ -36,87 +39,53 @@ class GSDFileParser(FileParser):  # or MatchingParser?
     def __init__(self):  # , *args, **kwargs
         super().__init__(None)  # , *args, **kwargs
 
-    #         self._nomad_to_hoomdblue_map = {}
-    #         self._nomad_to_hoomdblue_map['system'] = {}
-    #         self._nomad_to_hoomdblue_map['system']['atoms'] = {
-    #             # 'lattice_vectors': 'configuration.box',
-    #             'positions': 'particles.position',
-    #             'x_hoomdblue_orientation': 'particles.orientation',
-    #             # 'x_hoomdblue_typeid': 'particles.typeid',
-    #             'velocities': 'particles.velocity',
-    #             'x_hoomdblue_angmom': 'particles.angmom',
-    #             'x_hoomdblue_image': 'particles.image',
-    #         }
-
-    #         self._nomad_to_hoomdblue_map['calculation'] = {
-    #             'step': 'configuration.step',
-    #         }
-
-    #         self._nomad_to_hoomdblue_map['method'] = {}
-    #         self._nomad_to_hoomdblue_map['method']['atom_parameters'] = {atomistic-parsers
-    #             # 'x_hoomdblue_types': 'particles.types',
-    #             'mass': 'particles.mass',
-    #             'charge': 'particles.charge',
-    #             'x_hoomdblue_diameter': 'particles.diameter',
-    #             'x_hoomdblue_body': 'particles.body',
-    #             'x_hoomdblue_moment_inertia': 'particles.moment_inertia',
-    #             'x_hoomdblue_type_shapes': 'particles.type_shapes',
-    #         }
-    #         self._hoomdblue_interaction_keys = [
-    #             'bonds',
-    #             'angles',
-    #             'dihedrals',
-    #             'impropers',
-    #             'constraints',
-    #             'pairs',
-    #         ]
-
-    #     def get_attribute(self, source, path: str = None, default=None):
-    #         """
-    #         Extracts attribute from object based on path, and returns default if not defined.
-    #         """
-    #         if path:
-    #             section_segments = path.split('.')
-    #             for section in section_segments:
-    #                 try:
-    #                     value = getattr(source, section)
-    #                     source = value[-1] if isinstance(value, list) else value
-    #                 except Exception:
-    #                     return
-    #             source = source if source is not None else default
-    #             return source
-
-    #     def apply_unit(self, quantity, unit: str, unit_factor: float):
-    #         if quantity is None:
-    #             return
-    #         if unit:
-    #             unit_val = ureg(unit)
-    #             unit_val *= unit_factor
-    #             quantity *= unit_val
-
-    #         return quantity
+    # Extract data from gsd file, store with keyword (to_nomad mapping here or downstairs?)
+    # Keep sections separate -> easier to handle/debug
 
     def filegsd(self):
-        print(self._file_handler)
         if self._file_handler is None:
-            print(self.mainfile)
             try:
                 self._file_handler = gsdhoomd.open(name=self.mainfile, mode='r')
             except Exception:
                 self.logger.error('Error reading gsd file.')
         return self._file_handler
 
+    def get_attribute(self, source, attribute: str = None, default=None):
+        """
+        Extracts attribute from object based on path, and returns default if not defined.
+        """
+        if attribute:
+            print(attribute)
+            section_segments = attribute.split('.')
+            print(section_segments)
+            for section in section_segments:
+                print(section)
+                try:
+                    value = getattr(source, section)
+                    print(value)
+                    source = value[-1] if isinstance(value, list) else value
+                except Exception as e:
+                    print(e)
+                    return
+            source = source if source is not None else default
+            print(source)
+            return source
+
     def parse(self, path: str = None, **kwargs):
-        source = kwargs.get('source', self.filegsd)
+        print('kwargs', kwargs)
+        source = kwargs.get('source', self.filegsd())
         isattr = kwargs.get('isattr', False)
-        print(source, isattr)
-        # value = None
-        # if isattr:
-        #     attr_path, attribute = path.rsplit('.', 1)
-        #     value = self.get_attribute(source, attribute, path=attr_path)
-        # # else:
-        # #     value = self.get_value(source, path)
-        # self._results[path] = value
+        for frame in source:
+            print(source, isattr)
+            value = None
+            if isattr:
+                attr_path, attribute = path.rsplit('.', 1)
+                print(attr_path, attribute)
+                value = self.get_attribute(frame, attribute, path=attr_path)
+                print(value)
+            # else:
+            #     value = self.get_value(source, path)
+        self._results[path] = value
 
 
 class GSDParser(MDParser):
@@ -126,10 +95,14 @@ class GSDParser(MDParser):
         self._maindir = None
         self._gsd_files = None
         self._basename = None
+        self._n_frames = None
+        self._n_atoms = None
+        self._atom_parameters = None
+        self._time_unit = ureg.picosecond
+        self._frame_particles_position = 'frame.particles.position'
+        # self._particles_position_all = np.array([])
 
-    def test(self):
-        for frame in enumerate(self._data_parser.filegsd):
-            print(frame)
+    # Populating nomad schema and writing to archive here
 
     def write_to_archive(self) -> None:
         self._maindir = os.path.dirname(
@@ -140,7 +113,12 @@ class GSDParser(MDParser):
         ]
         self._basename = os.path.basename(self.mainfile).rsplit('.', 1)[0]
         self._data_parser.mainfile = self.mainfile
+        if self._data_parser.filegsd is None:
+            self.logger.warning('GSD file missing in GSD Parser.')
+            return
 
-        print('_maindir:', self._maindir)
-        print('_gsd_files:', self._gsd_files)
-        print('_basename:', self._basename)
+        for frame_idx, frame in enumerate(self._data_parser.filegsd()):
+            # print(frame.particles.position)
+            # print(frame.particles)
+            positions = self._data_parser.get('particles.positions', None)
+            print('positions', positions)
