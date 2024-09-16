@@ -50,13 +50,12 @@ class GSDFileParser(FileParser):  # or MatchingParser?
                 self.logger.error('Error reading gsd file.')
         return self._file_handler
 
-    def get_attribute(self, source, attribute: str = None, default=None):
+    def get_attribute(self, source, path: str = None, default=None):
         """
         Extracts attribute from object based on path, and returns default if not defined.
         """
-        if attribute:
-            print(attribute)
-            section_segments = attribute.split('.')
+        if path:
+            section_segments = path.split('.')
             print(section_segments)
             for section in section_segments:
                 print(section)
@@ -72,20 +71,20 @@ class GSDFileParser(FileParser):  # or MatchingParser?
             return source
 
     def parse(self, path: str = None, **kwargs):
-        print('kwargs', kwargs)
-        source = kwargs.get('source', self.filegsd())
-        isattr = kwargs.get('isattr', False)
-        for frame in source:
-            print(source, isattr)
-            value = None
-            if isattr:
-                attr_path, attribute = path.rsplit('.', 1)
-                print(attr_path, attribute)
-                value = self.get_attribute(frame, attribute, path=attr_path)
-                print(value)
-            # else:
-            #     value = self.get_value(source, path)
-        self._results[path] = value
+        pass
+        # print('kwargs', kwargs)
+        # source = kwargs.get('source', self.filegsd())
+        # isattr = kwargs.get('isattr', False)
+        # print(source, isattr)
+        # value = None
+        # if isattr:
+        #     attr_path, attribute = path.rsplit('.', 1)
+        #     print(attr_path, attribute)
+        #     value = self.get_attribute(source, attribute, path=attr_path)
+        #     print(value)
+        # # else:
+        # #     value = self.get_value(source, path)
+        # self._results[path] = value
 
 
 class GSDParser(MDParser):
@@ -99,10 +98,14 @@ class GSDParser(MDParser):
         self._n_atoms = None
         self._atom_parameters = None
         self._time_unit = ureg.picosecond
-        self._frame_particles_position = 'frame.particles.position'
-        # self._particles_position_all = np.array([])
+        self._frame_configuration_step = 'configuration.step'
+        self._frame_configuration_dimensions = 'configuration.dimensions'
+        self._frame_configuration_box = 'configuration.box'
+        self._frame_particles_position = 'particles.position'
 
     # Populating nomad schema and writing to archive here
+    def get_system_info(self, frame) -> dict:
+        self._system_info = {'system': {}, 'calculation': {}}
 
     def write_to_archive(self) -> None:
         self._maindir = os.path.dirname(
@@ -118,7 +121,9 @@ class GSDParser(MDParser):
             return
 
         for frame_idx, frame in enumerate(self._data_parser.filegsd()):
-            # print(frame.particles.position)
-            # print(frame.particles)
-            positions = self._data_parser.get('particles.positions', None)
-            print('positions', positions)
+            print(len(self._data_parser.filegsd()))
+            print(frame_idx, frame)
+            configuration = self._data_parser.get_attribute(frame, 'configuration')
+            print('configuration', configuration)
+            # positions = self._data_parser.get(frame, 'particles.positions', None)
+            # print('positions', positions)
