@@ -22,6 +22,7 @@ from nomad.units import ureg
 logging = structlog.get_logger()
 try:
     import gsd.hoomd as gsdhoomd
+    from gsd.hoomd import HOOMDTrajectory
     # import gsd.pygsd as gsdpy
 except ImportError:
     logging.warn('Required module gsd.hoomd not found.')
@@ -42,49 +43,69 @@ class GSDFileParser(FileParser):  # or MatchingParser?
     # Extract data from gsd file, store with keyword (to_nomad mapping here or downstairs?)
     # Keep sections separate -> easier to handle/debug
 
+    @property
     def filegsd(self):
         if self._file_handler is None:
             try:
                 self._file_handler = gsdhoomd.open(name=self.mainfile, mode='r')
             except Exception:
                 self.logger.error('Error reading gsd file.')
+
+            if type(self._file_handler) is not HOOMDTrajectory:
+                self.logger.error(
+                    'Uknown GSD file object, only HOOMDTrajectory objects are supported.'
+                )
         return self._file_handler
 
-    def get_attribute(self, source, attribute: str = None, default=None):
+    # def get_attribute(self, source, attribute: str = None, default=None):
+    #     """
+    #     Extracts attribute from object based on path, and returns default if not defined.
+    #     """
+    #     if attribute:
+    #         section_segments = attribute.split('.')
+    #         for section in section_segments:
+    #             try:
+    #                 value = getattr(source, section)
+    #                 source = value[-1] if isinstance(value, list) else value
+    #             except Exception:
+    #                 return
+    #         source = source if source is not None else default
+    #         return source
+
+    def get_value(self, group, path: str, default=None):
         """
-        Extracts attribute from object based on path, and returns default if not defined.
+        Extracts group or dataset from group object based on path, and returns default if not defined.
         """
-        if attribute:
-            print(attribute)
-            section_segments = attribute.split('.')
-            print(section_segments)
-            for section in section_segments:
-                print(section)
-                try:
-                    value = getattr(source, section)
-                    print(value)
-                    source = value[-1] if isinstance(value, list) else value
-                except Exception as e:
-                    print(e)
-                    return
-            source = source if source is not None else default
-            print(source)
-            return source
+        section_segments = path.split('.')
+        for section in section_segments:
+            try:
+                value = getattr(group, section)  # group.get(section)
+                # unit = self.get_attribute(group, 'unit', path=section)
+                # unit_factor = self.get_attribute(
+                #     group, 'unit_factor', path=section, default=1.0
+                # )
+                group = value
+            except Exception:
+                return
+
+        # if value is None:
+        #     value = default
+        # elif isinstance(value, h5py.Dataset):
+        #     value = value[()]
+        #     value = self.apply_unit(value, unit, unit_factor)
+        # value = self.decode_bytes(value)
+
+        return value if value is not None else default
 
     def parse(self, path: str = None, **kwargs):
-        print('kwargs', kwargs)
-        source = kwargs.get('source', self.filegsd())
-        isattr = kwargs.get('isattr', False)
-        for frame in source:
-            print(source, isattr)
+        frame_path = '.'.join(path.split('.')[1:])
+        frame = kwargs.get('frame', None)
+
+        if not frame:
             value = None
-            if isattr:
-                attr_path, attribute = path.rsplit('.', 1)
-                print(attr_path, attribute)
-                value = self.get_attribute(frame, attribute, path=attr_path)
-                print(value)
-            # else:
-            #     value = self.get_value(source, path)
+        else:
+            value = self.get_value(frame, frame_path)
+
         self._results[path] = value
 
 
@@ -107,7 +128,7 @@ class GSDParser(MDParser):
     def write_to_archive(self) -> None:
         self._maindir = os.path.dirname(
             self.mainfile
-        )  # GSD output single file or more?
+        )  # ? GSD output single file or more?
         self._gsd_files = [
             _file for _file in os.listdir(self._maindir) if _file.endswith('.gsd')
         ]
@@ -117,8 +138,8 @@ class GSDParser(MDParser):
             self.logger.warning('GSD file missing in GSD Parser.')
             return
 
-        for frame_idx, frame in enumerate(self._data_parser.filegsd()):
-            # print(frame.particles.position)
-            # print(frame.particles)
-            positions = self._data_parser.get('particles.positions', None)
-            print('positions', positions)
+        for frame_idx, frame in enumerate(self._data_parser.filegsd):
+            positions = self._data_parser.get(
+                f'{frame_idx}.particles.position', frame=frame
+            )
+            print(positions)
