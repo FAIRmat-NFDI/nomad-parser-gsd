@@ -10,10 +10,19 @@ if TYPE_CHECKING:
         BoundLogger,
     )
 
+import numpy as np
 from nomad.config import config
-from nomad.datamodel.data import Schema
+from nomad.datamodel.data import ArchiveSection, Schema
 from nomad.datamodel.metainfo.annotations import ELNAnnotation, ELNComponentEnum
-from nomad.metainfo import Quantity, SchemaPackage
+from nomad.metainfo import (
+    Context,
+    MEnum,
+    Quantity,
+    SchemaPackage,
+    Section,
+    SectionProxy,
+    SubSection,
+)
 
 configuration = config.get_plugin_entry_point(
     'nomad_parser_gsd.schema_packages:schema_package_entry_point'
