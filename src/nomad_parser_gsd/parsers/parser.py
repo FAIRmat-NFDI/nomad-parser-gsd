@@ -13,6 +13,9 @@ if TYPE_CHECKING:
         BoundLogger,
     )
 
+from ase.symbols import symbols2numbers
+from ase.utils import formula_hill
+from collections import defaultdict
 import nomad_simulations.schema_packages.properties.energies as energy_module
 import nomad_simulations.schema_packages.properties.forces as force_module
 import numpy as np
@@ -116,6 +119,7 @@ class GSDParser(MDParser):
         self._basename = None
         self._program_dict = None
         self._n_frames = None
+        self._first_frame = True
         self._time_unit = ureg.picosecond
         # ['N', 'position', 'orientation', 'types', 'typeid', 'mass', 'charge',
         # 'diameter', 'body', 'moment_inertia', 'velocity', 'angmom', 'image',
@@ -131,6 +135,7 @@ class GSDParser(MDParser):
             'charge': 'charge',
         }
         self._nomad_to_box_group_map = {
+            'step': 'step',
             'lattice_vectors': '_box',
             'periodic_boundary_conditions': None,
             'dimensionality': 'dimensions',
@@ -178,11 +183,117 @@ class GSDParser(MDParser):
             )
             return dict()
 
+    # ? Will connectivity information still be used in this way?
+    # connectivity
+    # \-- particles_group  #! Entire topology
+    #     \-- <group_1>
+    #       |    \-- (type): String[]  #! molecule_group, molecule, monomer_group, monomer
+    #       |    \-- (formula): String[]
+    #       |    \-- indices: Integer[]  #! list of integer indices corresponding to all particles belonging to this group
+    #       |    \-- (is_molecule): Bool
+    #  |    |    \-- (<custom_dataset>): <type>[]
+    #       |    \-- (particles_group): #! subgroups must be a subset of the grouping at the previous level of the hierarchy
+    #       |        \-- ...  #! The particles_group hierarchy ends at the level of individual particles
+    #! (i.e., individual particles are not stored, since this information is already contained within the particles group).
+    #       \-- <group_2>
+    #           \-- ...
+    def get_particles_group(self, connectivity):
+        # _interaction_keys = ['M', 'N', 'types', 'typeid', 'group']  # '_default_value'
+        # _groups = defaultdict(list)
+        # for idx, typeid in enumerate(self._particle_data_dict['typeid']):
+        #     _groups[self._particle_data_dict['types'][typeid]].append(idx)
+
+        _graph = defaultdict(list)
+        for bond in connectivity['bonds']:
+            _graph[bond[0]].append(bond[1])
+            _graph[bond[1]].append(bond[0])
+
+        # Depth-first search for connected components
+        # -> extract molecules from bond list
+        def dfs(node, visited, component):
+            visited.add(node)
+            component.append(node)
+            for neighbor in _graph[node]:
+                if neighbor not in visited:
+                    dfs(neighbor, visited, component)
+
+        _visited = set()
+        _components = []
+        # Traverse each node in the graph
+        for node in _graph:
+            if node not in _visited:
+                _component = []
+                dfs(node, _visited, _component)
+                _components.append(_component)
+
+        #! individual particles are not stored, since this information is already contained within the particles group
+        # # Get all particles that are not part of any bond
+        # _not_bond = [
+        #     idx
+        #     for idx, _ in enumerate(self._particle_data_dict['typeid'])
+        #     if idx not in _visited
+        # ]
+
+        _particles_group = dict()
+        _group_idx = 0
+
+        def add_groups(_group_idx, components):  # _components, _not_bond
+            _all_types = dict()
+            _idx_dict = defaultdict(list)
+            for component in components:
+                _types = list()
+                for idx in component:
+                    _types.append(self._particle_data_dict['typeid'][idx])
+                _types = tuple(sorted(_types))
+
+                if _types not in set(_all_types.values()):
+                    _all_types[_types] = f'group{_group_idx}'
+                    _idx_dict[f'group{_group_idx}'].extend(component)
+                    _group_idx += 1
+                else:
+                    group_name = _all_types[_types]
+                    _idx_dict[group_name].extend(component)
+            print(len(_components), len(_idx_dict.keys()))
+            # _particles_group[f'group{_group_idx}'] = _group
+
+        add_groups(_group_idx, _components)
+
+        return _particles_group
+
+    # connectivity
+    # \-- (bonds): Integer[N_part][2] #! Need to be lists of tuples
+    # \-- (angles): Integer[N_part][3]
+    # \-- (dihedrals): Integer[N_part][4]
+    # \-- (impropers): Integer[N_part][4]
+    # \-- (<custom_interaction>): Integer[N_part][m]
+    # \-- (particles_group)
+    #     \-- ...
+    def get_connectivity(self, interactions):
+        _connectivity = dict()
+        for key in interactions.keys():
+            if interactions[key]['N'] == 0:
+                self.logger.warn(f'No {key} information found in GSD file.')
+                _connectivity[key] = None
+            else:
+                _connectivity[key] = list(
+                    map(tuple, interactions[key]['group'].tolist())
+                )
+
+        _connectivity['particles_group'] = self.get_particles_group(_connectivity)
+
+        return _connectivity
+
     def get_system_info(self, frame_idx=None, frame=None):
         self._system_info = {'system': dict(), 'outputs': dict()}
         _path = f'{frame_idx}'
-        _configuration_keys = ['step', 'dimensions', '_box']
-        _interaction_keys = ['M', 'N', 'types', 'typeid', 'group', '_default_value']
+        _interaction_types = [
+            'bonds',
+            'angles',
+            'dihedrals',
+            'impropers',
+            'constraints',
+            'pairs',
+        ]
 
         def get_particle_parameters(path: str = None, frame=None):
             n_particles = self._data_parser.get(f'{path}.N', frame=frame)
@@ -190,6 +301,16 @@ class GSDParser(MDParser):
                 return dict()
             else:
                 return self._data_parser.get(path, frame=frame).__dict__
+
+        self._particle_data_dict = get_particle_parameters(
+            path=f'{frame_idx}.particles', frame=frame
+        )
+
+        if self._particle_data_dict is None:
+            self.logger.warning(
+                f'No number of particles available in frame {frame_idx}. Other'
+                ' particle attributes will not be stored for frame {frame_idx}.'
+            )
 
         def get_value(value, path=None, frame=None):
             if value is None:
@@ -200,7 +321,7 @@ class GSDParser(MDParser):
                 ).__dict__
                 if value is None:
                     self.logger.warning(
-                        f'No attributes found for key {value}. These attributes will '
+                        f'No attributes found for key {value}. {value.upper()} attributes will '
                         'not be stored.'
                     )
                     return None
@@ -212,23 +333,13 @@ class GSDParser(MDParser):
             except AttributeError:
                 pass
 
-        _particle_data_dict = get_particle_parameters(
-            path=f'{frame_idx}.particles', frame=frame
-        )
-        # print(_particle_data_dict.keys())
-        if _particle_data_dict is None:
-            self.logger.warning(
-                f'No number of particles available in frame {frame_idx}. Other'
-                ' particle attributes will not be stored for frame {frame_idx}.'
-            )
-
-        system_keys = {
-            'time': ['system', 'outputs'],
+        info_keys = {
+            'step': ['system', 'outputs'],
             'n_atoms': 'system',
             'positions': 'system',
             'labels': 'system',
-            'velocities': 'system',
             'mass': 'system',
+            'velocities': 'system',
             'charge': 'system',
             'lattice_vectors': 'system',
             'periodic_boundary_conditions': 'system',
@@ -237,95 +348,95 @@ class GSDParser(MDParser):
             'label': 'outputs',
         }
 
-        # get quantities from particles chunk of GSD file
+        # Get quantities from particles chunk of GSD file
         for key, gsd_key in self._nomad_to_particles_group_map.items():
-            section = system_keys[key]
+            section = info_keys[key]
             if isinstance(section, list):
                 for sec in section:
                     self._system_info[sec][key] = (
-                        _particle_data_dict[gsd_key] if gsd_key is not None else None
+                        self._particle_data_dict[gsd_key]
+                        if gsd_key is not None
+                        else None
                     )
             else:
-                self._system_info[system_keys[key]][key] = (
-                    _particle_data_dict[gsd_key] if gsd_key is not None else None
+                self._system_info[section][key] = (
+                    self._particle_data_dict[gsd_key] if gsd_key is not None else None
                 )
-        # get steps and box quantities on from configurations chunk of GSD file:
+        # Get step and box attributes from configurations chunk of GSD file:
         for key, gsd_key in self._nomad_to_box_group_map.items():
-            section = system_keys[key]
-            values_dict = get_value('configuration', path=_path, frame=frame)
+            section = info_keys[key]
+            _values_dict = get_value('configuration', path=_path, frame=frame)
             if isinstance(section, list):
                 for sec in section:
                     self._system_info[sec][key] = (
-                        values_dict[gsd_key] if gsd_key is not None else None
+                        _values_dict[gsd_key] if gsd_key is not None else None
                     )
             else:
-                self._system_info[system_keys[key]][key] = (
-                    values_dict[gsd_key] if gsd_key is not None else None
+                self._system_info[section][key] = (
+                    _values_dict[gsd_key] if gsd_key is not None else None
                 )
 
-        # print(frame.__dict__.keys())
-        # {'configuration': <gsd.hoomd.ConfigurationData object at 0x7f846452ad90>,
-        # 'particles': <gsd.hoomd.ParticleData object at 0x7f846452ae10>,
-        # 'bonds': <gsd.hoomd.BondData object at 0x7f846452add0>,
-        # 'angles': <gsd.hoomd.BondData object at 0x7f846452ae90>,
-        # 'dihedrals': <gsd.hoomd.BondData object at 0x7f846452af50>,
-        # 'impropers': <gsd.hoomd.BondData object at 0x7f846452b010>,
-        # 'constraints': <gsd.hoomd.ConstraintData object at 0x7f846452b0d0>,
-        # 'pairs': <gsd.hoomd.BondData object at 0x7f846452b150>,
-        # 'state': {},
-        # 'log': {},
-        # '_valid_state': ['hpmc/integrate/d', 'hpmc/integrate/a',
-        # 'hpmc/sphere/radius', 'hpmc/sphere/orientable', 'hpmc/ellipsoid/a',
-        # 'hpmc/ellipsoid/b', 'hpmc/ellipsoid/c', 'hpmc/convex_polyhedron/N',
-        # 'hpmc/convex_polyhedron/vertices', 'hpmc/convex_spheropolyhedron/N',
-        # 'hpmc/convex_spheropolyhedron/vertices',
-        # 'hpmc/convex_spheropolyhedron/sweep_radius', 'hpmc/convex_polygon/N',
-        # 'hpmc/convex_polygon/vertices', 'hpmc/convex_spheropolygon/N',
-        # 'hpmc/convex_spheropolygon/vertices',
-        # 'hpmc/convex_spheropolygon/sweep_radius',
-        # 'hpmc/simple_polygon/N', 'hpmc/simple_polygon/vertices']}
-
-        # for key in frame.__dict__.keys():
-        #     values_dict = get_value(key, path=_path, frame=frame)
-        #     if values_dict is not None:
-        #         for value_key in values_dict.keys():
-        #             print(value_key)
-
-        _configuration_data_dict = get_value('configuration', path=_path, frame=frame)
-        # self._system_info['system']['steps'] = _configuration_data_dict['step']
-        # self._system_info['outputs']['steps'] = _configuration_data_dict['step']
-
-        _bonds_dict = get_value('bonds', path=_path, frame=frame)
-        _angles_dict = get_value('angles', path=_path, frame=frame)
-        _dihedrals_dict = get_value('dihedrals', path=_path, frame=frame)
-        _impropers_dict = get_value('impropers', path=_path, frame=frame)
-        _pairs_dict = get_value('pairs', path=_path, frame=frame)
+        # Extract interacton infromation from frame,
+        # build connectivity structure following Nomad-H5MD schema.
+        _interaction_dicts = dict()
+        for interaction in _interaction_types:
+            _interaction_dicts[interaction] = get_value(
+                interaction, path=_path, frame=frame
+            )
+        self._connectivity = self.get_connectivity(_interaction_dicts)
+        # print(self._connectivity)
 
         return self._system_info
 
-    def parse_system(self, simulation):
-        system_info = self._system_info.get('system')
+    def parse_system(self, simulation, frame_idx=None, frame=None):
+        system_info = self._system_info.get(
+            'system'
+        )  # ? Will I really need this in the end?
+        atoms_dict = self._system_info.get('system')
+        _path = f'{frame_idx}'
         if not system_info:
             self.logger.error('No particle information found in GSD file.')
             return
 
-        # atoms_dict = system_info['step']
-        # atoms_dict['is_representative'] = False
+        self._system_time_map = {}  # ? Is this required?
+        topology = None  # ? Is this required?
 
-        # atom_labels = atoms_dict.get('labels')
-        # if atom_labels is not None:
-        #     try:
-        #         # symbols2numbers(atom_labels)
-        #         atoms_dict['labels'] = atom_labels
-        #     except KeyError:  # TODO this check should be moved to the system normalizer in the new schema
-        #         atoms_dict['labels'] = ['X'] * len(atom_labels)
+        # ! This was added according to existing nomad approach,
+        # ! does not support (semi) grand canonical hoomd-Blue output.
+        if self._first_frame is True:
+            self.logger.warn(
+                'Only the topology of the first frame will be stored, '
+                'grand canonical simulations are currently not supported.'
+            )
+            atoms_dict['is_representative'] = True
+            self._first_frame = False
+        else:
+            atoms_dict['is_representative'] = False
 
-        # topology = None
-        # if i_step == 0:  # TODO extend to time-dependent bond lists and topologies
-        #     atoms_dict['is_representative'] = True
-        #     atoms_dict['bond_list'] = self._data_parser.get('connectivity.bonds')
-        #     path_topology = 'connectivity.particles_group'
-        #     topology = self._data_parser.get(path_topology)
+        atom_labels = atoms_dict.get('labels')
+        if atom_labels is not None:
+            try:
+                symbols2numbers(atom_labels)
+                atoms_dict['labels'] = atom_labels
+            except KeyError:  # TODO this check should be moved to the system normalizer in the new schema
+                atoms_dict['labels'] = ['X'] * len(atom_labels)
+
+        bond_dict = self._data_parser.get(f'{frame_idx}.bonds', frame=frame).__dict__
+        atoms_dict['bond_list'] = bond_dict['group']
+
+        # ! Natively, no time step stored in GSD file. Copy frame index instead,
+        # ! alert user to missing information.
+        time = atoms_dict.pop('step')
+        time_unit = time.units if hasattr(time, 'units') else None
+        atoms_dict['time_step'] = time.magnitude if time_unit is not None else time
+        if time_unit is None:
+            self.logger.warn(
+                'No magnitude and unit information provided for the '
+                'simulation time step'
+            )
+
+        # path_topology = 'connectivity.particles_group'
+        # topology = self._data_parser.get(path_topology)
 
         # # REMAP some of the data for the schema
         # atoms_dict['branch_label'] = (
@@ -380,12 +491,12 @@ class GSDParser(MDParser):
         )
         for frame_idx, frame in enumerate(self._data_parser.filegsd):
             self.get_system_info(frame_idx=frame_idx, frame=frame)
-            self.parse_system(simulation)
-            print(self._system_info)
+            self.parse_system(simulation, frame_idx=frame_idx, frame=frame)
+            # print(self._system_info)
             # TODO: parse systems_info dict to nomad
 
             # ? Forces etc. are user-defined and read via get_logged_info?
             # TODO: Extract observables from logged data, parse to ModelOutput
-            # system_keys = {
+            # info_keys = {
             #     'forces': 'calculation',
             # }
