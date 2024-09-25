@@ -1,5 +1,5 @@
 import os
-from typing import TYPE_CHECKING, Iterable, Union
+from typing import TYPE_CHECKING, List, Iterable, Union
 
 if TYPE_CHECKING:
     from nomad.datamodel.datamodel import (
@@ -36,17 +36,17 @@ from nomad_simulations.schema_packages.general import (
 from nomad_simulations.schema_packages.general import Program as BaseProgram
 from nomad_simulations.schema_packages.outputs import TotalEnergy, TotalForce
 
-# # nomad-parser-gsd
-# from nomad_parser_gsd.schema_packages.schema import (
-#     Author,
-#     EnergyEntry,
-#     ForceEntry,
-#     ModelSystem,
-#     OutputsEntry,
-#     ParamEntry,
-#     Stress,
-#     TrajectoryOutputs,
-# )
+# nomad-parser-gsd
+from nomad_parser_gsd.schema_packages.schema import (
+    Author,
+    ModelSystem,
+    TrajectoryOutputs,
+    CustomProperty,
+    ParamEntry,
+    ForceEntry,
+    EnergyEntry,
+    Stress,
+)
 
 logging = structlog.get_logger()
 try:
@@ -55,7 +55,7 @@ try:
     from gsd.hoomd import HOOMDTrajectory
     # import gsd.pygsd as gsdpy
 except ImportError:
-    logging.warn('Required module gsd.hoomd not found.')
+    logging.warning('Required module gsd.hoomd not found.')
     gsdhoomd = False
     # gsdpy = False
 
@@ -159,6 +159,12 @@ class GSDParser(MDParser):
         _program_info['gsd_version'] = (
             _file_layer.gsd_version
         )  # TODO: tuple(major, minor). Format?
+        _program_info['gsd_author_name'] = None
+        _program_info['gsd_author_email'] = None
+        _program_info['gsd_creator_name'] = 'Sharon Glotzer'
+        _program_info['gsd_creator_version'] = (
+            'https://glotzerlab.engin.umich.edu/hoomd-blue/'
+        )
 
         self._n_frames = _file_layer.nframes  # ? Not ideal to access in get_program, but only file layer object has attribute nframes
 
@@ -183,92 +189,158 @@ class GSDParser(MDParser):
             )
             return dict()
 
-    # ? Will connectivity information still be used in this way?
-    # connectivity
-    # \-- particles_group  #! Entire topology
-    #     \-- <group_1>
-    #       |    \-- (type): String[]  #! molecule_group, molecule, monomer_group, monomer
-    #       |    \-- (formula): String[]
-    #       |    \-- indices: Integer[]  #! list of integer indices corresponding to all particles belonging to this group
-    #       |    \-- (is_molecule): Bool
-    #  |    |    \-- (<custom_dataset>): <type>[]
-    #       |    \-- (particles_group): #! subgroups must be a subset of the grouping at the previous level of the hierarchy
-    #       |        \-- ...  #! The particles_group hierarchy ends at the level of individual particles
-    #! (i.e., individual particles are not stored, since this information is already contained within the particles group).
-    #       \-- <group_2>
-    #           \-- ...
-    def get_particles_group(self, connectivity):
-        # _interaction_keys = ['M', 'N', 'types', 'typeid', 'group']  # '_default_value'
-        # _groups = defaultdict(list)
-        # for idx, typeid in enumerate(self._particle_data_dict['typeid']):
-        #     _groups[self._particle_data_dict['types'][typeid]].append(idx)
+    def get_composition(self, children_names):
+        """
+        Given a list of children, return a compositional formula as a function of
+        these children. The format is <child_1>(n_child_1)<child_2>(n_child_2)...
+        """
+        children_count_tup = np.unique(children_names, return_counts=True)
+        formula = ''.join(
+            [f'{name}({count})' for name, count in zip(*children_count_tup)]
+        )
+        return formula
 
-        _graph = defaultdict(list)
-        for bond in connectivity['bonds']:
-            _graph[bond[0]].append(bond[1])
-            _graph[bond[1]].append(bond[0])
+    def get_molecules_from_bond_list(
+        self,
+        n_particles: int,
+        bond_list: List[int],
+        particle_types: List[str] = None,
+        particles_typeid=None,
+    ):
+        """
+        Returns a dictionary with molecule info from the list of bonds
+        """
 
-        # Depth-first search for connected components
-        # -> extract molecules from bond list
-        def dfs(node, visited, component):
-            visited.add(node)
-            component.append(node)
-            for neighbor in _graph[node]:
-                if neighbor not in visited:
-                    dfs(neighbor, visited, component)
+        import networkx
 
-        _visited = set()
-        _components = []
-        # Traverse each node in the graph
-        for node in _graph:
-            if node not in _visited:
-                _component = []
-                dfs(node, _visited, _component)
-                _components.append(_component)
+        system_graph = networkx.empty_graph(n_particles)
+        system_graph.add_edges_from([(i[0], i[1]) for i in bond_list])
+        molecules = [
+            system_graph.subgraph(c).copy()
+            for c in networkx.connected_components(system_graph)
+        ]
+        mol_dict = []
+        for i_mol, mol in enumerate(molecules):
+            mol_dict.append({})
+            mol_dict[i_mol]['indices'] = np.array(mol.nodes())
+            mol_dict[i_mol]['bonds'] = np.array(mol.edges())
+            mol_dict[i_mol]['type'] = 'molecule'
+            mol_dict[i_mol]['is_molecule'] = True
+            if particles_typeid is None and len(particle_types) == n_particles:
+                mol_dict[i_mol]['names'] = [
+                    particle_types[int(x)]
+                    for x in sorted(np.array(mol_dict[i_mol]['indices']))
+                ]
+            if particle_types is not None and particles_typeid is not None:
+                mol_dict[i_mol]['names'] = [
+                    particle_types[particles_typeid[int(x)]]
+                    for x in sorted(np.array(mol_dict[i_mol]['indices']))
+                ]
+            mol_dict[i_mol]['formula'] = self.get_composition(mol_dict[i_mol]['names'])
 
-        #! individual particles are not stored, since this information is already contained within the particles group
-        # # Get all particles that are not part of any bond
-        # _not_bond = [
-        #     idx
-        #     for idx, _ in enumerate(self._particle_data_dict['typeid'])
-        #     if idx not in _visited
-        # ]
+        return mol_dict
 
-        _particles_group = dict()
-        _group_idx = 0
+    def is_same_molecule(self, mol_1: dict, mol_2: dict):
+        """
+        Checks whether the 2 input molecule dictionaries represent the same
+        molecule type, i.e., same particle types and corresponding bond connections.
+        """
 
-        def add_groups(_group_idx, components):  # _components, _not_bond
-            _all_types = dict()
-            _idx_dict = defaultdict(list)
-            for component in components:
-                _types = list()
-                for idx in component:
-                    _types.append(self._particle_data_dict['typeid'][idx])
-                _types = tuple(sorted(_types))
+        if sorted(mol_1['names']) == sorted(mol_2['names']):
+            mol_1_shift = np.min(mol_1['indices'])
+            mol_2_shift = np.min(mol_2['indices'])
+            mol_1_bonds_shift = mol_1['bonds'] - mol_1_shift
+            mol_2_bonds_shift = mol_2['bonds'] - mol_2_shift
 
-                if _types not in set(_all_types.values()):
-                    _all_types[_types] = f'group{_group_idx}'
-                    _idx_dict[f'group{_group_idx}'].extend(component)
-                    _group_idx += 1
-                else:
-                    group_name = _all_types[_types]
-                    _idx_dict[group_name].extend(component)
-            print(len(_components), len(_idx_dict.keys()))
-            # _particles_group[f'group{_group_idx}'] = _group
+            bond_list_1 = [
+                sorted((mol_1['names'][i], mol_1['names'][j]))
+                for i, j in mol_1_bonds_shift
+            ]
+            bond_list_2 = [
+                sorted((mol_2['names'][i], mol_2['names'][j]))
+                for i, j in mol_2_bonds_shift
+            ]
 
-        add_groups(_group_idx, _components)
+            bond_list_names_1, bond_list_counts_1 = np.unique(
+                bond_list_1, axis=0, return_counts=True
+            )
+            bond_list_names_2, bond_list_counts_2 = np.unique(
+                bond_list_2, axis=0, return_counts=True
+            )
 
-        return _particles_group
+            bond_list_dict_1 = {
+                bond[0] + '-' + bond[1]: bond_list_counts_1[i_bond]
+                for i_bond, bond in enumerate(bond_list_names_1)
+            }
+            bond_list_dict_2 = {
+                bond[0] + '-' + bond[1]: bond_list_counts_2[i_bond]
+                for i_bond, bond in enumerate(bond_list_names_2)
+            }
+            if bond_list_dict_1 == bond_list_dict_2:
+                return True
 
-    # connectivity
-    # \-- (bonds): Integer[N_part][2] #! Need to be lists of tuples
-    # \-- (angles): Integer[N_part][3]
-    # \-- (dihedrals): Integer[N_part][4]
-    # \-- (impropers): Integer[N_part][4]
-    # \-- (<custom_interaction>): Integer[N_part][m]
-    # \-- (particles_group)
-    #     \-- ...
-    def get_connectivity(self, interactions):
+            return False
+
+        return False
+
+    def get_particles_group(self, bond_list: np.array, molecule_labels=None):
+        n_atoms = self._particle_data_dict['N']
+        particle_types = [
+            self._particle_data_dict['types'][typeid]
+            for idx, typeid in enumerate(self._particle_data_dict['typeid'])
+        ]
+        molecules = self.get_molecules_from_bond_list(
+            n_atoms,
+            bond_list,
+            particle_types=particle_types,
+            particles_typeid=None,
+        )
+        # create the topology
+        mol_groups = []
+        mol_groups.append({})
+        mol_groups[0]['molecules'] = []
+        mol_groups[0]['molecules'].append(molecules[0])
+        mol_groups[0]['type'] = 'molecule_group'
+        mol_groups[0]['is_molecule'] = False
+        for mol in molecules[1:]:
+            flag_mol_group_exists = False
+            for i_mol_group in range(len(mol_groups)):
+                if self.is_same_molecule(mol, mol_groups[i_mol_group]['molecules'][0]):
+                    mol_groups[i_mol_group]['molecules'].append(mol)
+                    flag_mol_group_exists = True
+                    break
+            if not flag_mol_group_exists:
+                mol_groups.append({})
+                mol_groups[-1]['molecules'] = []
+                mol_groups[-1]['molecules'].append(mol)
+                mol_groups[-1]['type'] = 'molecule_group'
+                mol_groups[-1]['is_molecule'] = False
+
+        if not molecule_labels:
+            molecule_labels = [f'mol_type_{idx}' for idx in range(len(mol_groups))]
+
+        for i_mol_group, mol_group in enumerate(mol_groups):
+            mol_groups[i_mol_group]['formula'] = (
+                molecule_labels[i_mol_group]
+                + '('
+                + str(len(mol_group['molecules']))
+                + ')'
+            )
+            mol_groups[i_mol_group]['label'] = 'group_' + str(
+                molecule_labels[i_mol_group]
+            )
+            mol_group_indices = []
+            for i_molecule, molecule in enumerate(mol_group['molecules']):
+                molecule['label'] = molecule_labels[i_mol_group]
+                mol_indices = molecule['indices']
+                mol_group_indices.append(mol_indices)
+
+            mol_group['indices'] = np.concatenate(mol_group_indices)
+
+        return mol_groups
+
+    def get_connectivity(self, interactions, molecule_labels=None):
+        # TODO: Carry molecule_labels through to a meaningful point in case molecule labels were passed by user.
         _connectivity = dict()
         for key in interactions.keys():
             if interactions[key]['N'] == 0:
@@ -279,7 +351,9 @@ class GSDParser(MDParser):
                     map(tuple, interactions[key]['group'].tolist())
                 )
 
-        _connectivity['particles_group'] = self.get_particles_group(_connectivity)
+        _connectivity['particles_group'] = self.get_particles_group(
+            interactions['bonds']['group'], molecule_labels=molecule_labels
+        )
 
         return _connectivity
 
@@ -384,27 +458,67 @@ class GSDParser(MDParser):
                 interaction, path=_path, frame=frame
             )
         self._connectivity = self.get_connectivity(_interaction_dicts)
-        # print(self._connectivity)
 
         return self._system_info
 
+    def parse_system_hierarchy(
+        self,
+        nomad_sec: ModelSystem,
+        # h5md_sec_particlesgroup: Group,
+        # path_particlesgroup: str,
+    ):
+        data = {}
+        # for key in h5md_sec_particlesgroup.keys():
+        #     path_particlesgroup_key = f'{path_particlesgroup}.{key}'
+        #     particles_group = {
+        #         group_key: self._data_parser.get(
+        #             f'{path_particlesgroup_key}.{group_key}'
+        #         )
+        #         for group_key in h5md_sec_particlesgroup[key].keys()
+        #     }
+        #     sec_model_system = ModelSystem()
+        #     nomad_sec.model_system.append(sec_model_system)
+        #     data['branch_label'] = particles_group.pop('label', None)
+        #     data['atom_indices'] = particles_group.pop('indices', None)
+        #     # TODO remove the deprecated below from the test file
+        #     # sec_atomsgroup.type = particles_group.pop("type", None) #? deprecate?
+        #     particles_group.pop('type', None)
+        #     # sec_atomsgroup.is_molecule = particles_group.pop("is_molecule", None) #? deprecate?
+        #     particles_group.pop('is_molecule', None)
+        #     particles_group.pop('formula', None)  # covered in normalization now
+        #     # write all the standard quantities to the archive
+        #     self.parse_section(data, sec_model_system)
+        #     particles_subgroup = particles_group.pop('particles_group', None)
+
+        #     # set the remaining attributes
+        #     for particles_group_key in particles_group.keys():
+        #         val = particles_group.get(particles_group_key)
+        #         units = val.units if hasattr(val, 'units') else None
+        #         val = val.magnitude if units is not None else val
+        #         sec_model_system.custom_system_attributes.append(
+        #             ParamEntry(name=particles_group_key, value=val, unit=units)
+        #         )
+
+        #     # get the next branch level
+        #     if particles_subgroup:
+        #         self.parse_system_hierarchy(
+        #             sec_model_system,
+        #             particles_subgroup,
+        #             f'{path_particlesgroup_key}.particles_group',
+        #         )
+
     def parse_system(self, simulation, frame_idx=None, frame=None):
-        system_info = self._system_info.get(
-            'system'
-        )  # ? Will I really need this in the end?
         atoms_dict = self._system_info.get('system')
         _path = f'{frame_idx}'
-        if not system_info:
+        if not atoms_dict:
             self.logger.error('No particle information found in GSD file.')
             return
 
         self._system_time_map = {}  # ? Is this required?
-        topology = None  # ? Is this required?
 
-        # ! This was added according to existing nomad approach,
-        # ! does not support (semi) grand canonical hoomd-Blue output.
+        # TODO: extend to support visualization of time-dependent bond lists and topologies from (semi) grand canonical ensembles.
         if self._first_frame is True:
-            self.logger.warn(
+            self.logger.warning(
                 'Only the topology of the first frame will be stored, '
                 'grand canonical simulations are currently not supported.'
             )
@@ -412,6 +526,7 @@ class GSDParser(MDParser):
             self._first_frame = False
         else:
             atoms_dict['is_representative'] = False
+        topology = self._connectivity['particles_group']
 
         atom_labels = atoms_dict.get('labels')
         if atom_labels is not None:
@@ -430,39 +545,30 @@ class GSDParser(MDParser):
         time_unit = time.units if hasattr(time, 'units') else None
         atoms_dict['time_step'] = time.magnitude if time_unit is not None else time
         if time_unit is None:
-            self.logger.warn(
+            self.logger.warning(
                 'No magnitude and unit information provided for the '
                 'simulation time step'
             )
 
-        # path_topology = 'connectivity.particles_group'
-        # topology = self._data_parser.get(path_topology)
+        # REMAP some of the data for the schema
+        atoms_dict['branch_label'] = f'System {time}'
+        atomic_cell_keys = [
+            'n_atoms',
+            'lattice_vectors',
+            'periodic_boundary_conditions',
+            'positions',
+            'velocities',
+            'labels',
+        ]
+        atoms_dict['atomic_cell'] = {}
+        for key in atomic_cell_keys:
+            atoms_dict['atomic_cell'][key] = atoms_dict.pop(key)
 
-        # # REMAP some of the data for the schema
-        # atoms_dict['branch_label'] = (
-        #     'Total System'  # ? Do we or should we have a default name for the entire system?
-        # )
-        # atoms_dict['time_step'] = atoms_dict.pop(
-        #     'time'
-        # ).magnitude  # TODO change in system_info
-        # atomic_cell_keys = [
-        #     'n_atoms',
-        #     'lattice_vectors',
-        #     'periodic_boundary_conditions',
-        #     'positions',
-        #     'velocities',
-        #     'labels',
-        # ]
-        # atoms_dict['atomic_cell'] = {}
-        # for key in atomic_cell_keys:
-        #     atoms_dict['atomic_cell'][key] = atoms_dict.pop(key)
+        # self.parse_trajectory_step({'atoms': atoms_dict})
+        # ? MDParser.parse_trajectory_step doesn't work for the new schema, clone function?
 
-        # self.parse_trajectory_step(atoms_dict, simulation)
-
-        # if i_step == 0 and topology:  # TODO extend to time-dependent topologies
-        #     self.parse_system_hierarchy(
-        #         simulation.model_system[-1], topology, path_topology
-        #     )
+        # if topology:  # TODO extend to time-dependent topologies
+        #     self.parse_system_hierarchy(simulation.model_system[-1], topology)
 
     def write_to_archive(self) -> None:
         #######################################################################
@@ -489,14 +595,27 @@ class GSDParser(MDParser):
             name=self._program_dict['name'],
             version=self._program_dict['version'],
         )
+        simulation.x_gsd_version = self._program_dict['gsd_version']
+        simulation.x_gsd_schema = Program(
+            name=self._program_dict.get('schema'),
+            version=f"{self._program_dict.get('schema_version')[0]}.{self._program_dict.get('schema_version')[1]}",
+        )
+        simulation.x_gsd_author = Author(
+            name=self._program_dict.get('gsd_author_name'),
+            email=self._program_dict.get('gsd_author_email'),
+        )
+        simulation.x_gsd_creator = Program(
+            name=self._program_dict.get('gsd_creator_name'),
+            version=self._program_dict.get('gsd_creator_version'),
+        )
         for frame_idx, frame in enumerate(self._data_parser.filegsd):
             self.get_system_info(frame_idx=frame_idx, frame=frame)
             self.parse_system(simulation, frame_idx=frame_idx, frame=frame)
-            # print(self._system_info)
-            # TODO: parse systems_info dict to nomad
 
             # ? Forces etc. are user-defined and read via get_logged_info?
             # TODO: Extract observables from logged data, parse to ModelOutput
-            # info_keys = {
+            # self.parse_outputs(simulation, frame_idx=frame_idx, frame=frame)
+
+            # observable_keys = {
             #     'forces': 'calculation',
             # }
