@@ -27,13 +27,12 @@ from nomad.config import config
 from nomad.datamodel.metainfo.workflow import Workflow
 from nomad.parsing.file_parser import FileParser
 from nomad.units import ureg
+
+# nomad-simulations
 from nomad_simulations.schema_packages.general import (
     Program,
     Simulation,
 )
-
-# nomad-simulations
-from nomad_simulations.schema_packages.general import Program as BaseProgram
 from nomad_simulations.schema_packages.outputs import TotalEnergy, TotalForce
 
 # nomad-parser-gsd
@@ -172,34 +171,6 @@ class GSDParser(MDParser):
 
         return _program_info
 
-    """
-    Logged data encompasses values computed at simulation time that are too expensive 
-    or cumbersome to re-compute in post processing. This specification does not define 
-    specific chunk names or define logged data. Users may select any valid name for 
-    logged data chunks as appropriate for their workflow.
-    """
-
-    # Additional data are stored in the log dictionary as numpy arrays:
-    def get_logged_info(self):
-        try:
-            return gsdhoomd.read_log(name=self.mainfile, scalar_only=False)
-        except FileNotFoundError:
-            self.logger.warning(
-                'No additional logged data found, no user-defined data will be stored.'
-            )
-            return dict()
-
-    def get_composition(self, children_names):
-        """
-        Given a list of children, return a compositional formula as a function of
-        these children. The format is <child_1>(n_child_1)<child_2>(n_child_2)...
-        """
-        children_count_tup = np.unique(children_names, return_counts=True)
-        formula = ''.join(
-            [f'{name}({count})' for name, count in zip(*children_count_tup)]
-        )
-        return formula
-
     def get_molecules_from_bond_list(
         self,
         n_particles: int,
@@ -219,6 +190,18 @@ class GSDParser(MDParser):
             system_graph.subgraph(c).copy()
             for c in networkx.connected_components(system_graph)
         ]
+
+        def get_composition(children_names):
+            """
+            Given a list of children, return a compositional formula as a function of
+            these children. The format is <child_1>(n_child_1)<child_2>(n_child_2)...
+            """
+            children_count_tup = np.unique(children_names, return_counts=True)
+            formula = ''.join(
+                [f'{name}({count})' for name, count in zip(*children_count_tup)]
+            )
+            return formula
+
         mol_dict = []
         for i_mol, mol in enumerate(molecules):
             mol_dict.append({})
@@ -236,7 +219,7 @@ class GSDParser(MDParser):
                     particle_types[particles_typeid[int(x)]]
                     for x in sorted(np.array(mol_dict[i_mol]['indices']))
                 ]
-            mol_dict[i_mol]['formula'] = self.get_composition(mol_dict[i_mol]['names'])
+            mol_dict[i_mol]['formula'] = get_composition(mol_dict[i_mol]['names'])
 
         return mol_dict
 
@@ -464,19 +447,20 @@ class GSDParser(MDParser):
     def parse_system_hierarchy(
         self,
         nomad_sec: ModelSystem,
-        # h5md_sec_particlesgroup: Group,
+        gsd_sec_particlesgroup: dict,
         # path_particlesgroup: str,
     ):
         data = {}
-        # for key in h5md_sec_particlesgroup.keys():
-        #     path_particlesgroup_key = f'{path_particlesgroup}.{key}'
-        #     particles_group = {
-        #         group_key: self._data_parser.get(
-        #             f'{path_particlesgroup_key}.{group_key}'
-        #         )
-        #         for group_key in h5md_sec_particlesgroup[key].keys()
-        #     }
-        #     sec_model_system = ModelSystem()
+        for key in gsd_sec_particlesgroup.keys():
+            print(key)
+            #     path_particlesgroup_key = f'{path_particlesgroup}.{key}'
+            #     particles_group = {
+            #         group_key: self._data_parser.get(
+            #             f'{path_particlesgroup_key}.{group_key}'
+            #         )
+            #         for group_key in h5md_sec_particlesgroup[key].keys()
+            #     }
+            sec_model_system = ModelSystem()
         #     nomad_sec.model_system.append(sec_model_system)
         #     data['branch_label'] = particles_group.pop('label', None)
         #     data['atom_indices'] = particles_group.pop('indices', None)
@@ -514,7 +498,7 @@ class GSDParser(MDParser):
             self.logger.error('No particle information found in GSD file.')
             return
 
-        self._system_time_map = {}  # ? Is this required?
+        self._system_time_map = {}  # ? Is this required? What is ist used for?
 
         # TODO: extend to support visualization of time-dependent bond lists and topologies from (semi) grand canonical ensembles.
         if self._first_frame is True:
@@ -564,11 +548,34 @@ class GSDParser(MDParser):
         for key in atomic_cell_keys:
             atoms_dict['atomic_cell'][key] = atoms_dict.pop(key)
 
+        # ! MDParser.parse_trajectory_step doesn't work for the new schema, cloning function.
         # self.parse_trajectory_step({'atoms': atoms_dict})
-        # ? MDParser.parse_trajectory_step doesn't work for the new schema, clone function?
 
-        # if topology:  # TODO extend to time-dependent topologies
+        # TODO: parse and store topology in every step to accomodate time-dependent topologies
+        # if topology:
         #     self.parse_system_hierarchy(simulation.model_system[-1], topology)
+
+    # Additional data are stored in the log dictionary as numpy arrays:
+    def parse_outputs(self, simulation: Simulation):
+        """
+        Logged data encompasses values computed at simulation time that are too expensive
+        or cumbersome to re-compute in post processing. This specification does not define
+        specific chunk names or define logged data. Users may select any valid name for
+        logged data chunks as appropriate for their workflow.
+        """
+
+        def get_logged_info(self):
+            try:
+                return gsdhoomd.read_log(name=self.mainfile, scalar_only=False)
+            except FileNotFoundError:
+                self.logger.warning(
+                    'No additional logged data found, no user-defined data will be stored.'
+                )
+                return dict()
+
+        # TODO: parse log dictionary, programmatically write to archive. Sections identified by dictionary keys.
+        # ? Is the logged data section present in every frame, or only the last one?
+        # ? Information on step(s) present or needs grabbing from upstream?
 
     def write_to_archive(self) -> None:
         #######################################################################
