@@ -165,10 +165,10 @@ class MDParser(Parser):
                     # if not hasattr(Enum, label):
                     #     Enum.label = label
                     #         return Enum.label
-                    Enum.chemical_symbol = label
+                    Enum.DEFAULT = label  # ? Enum class defined without default value?
                     self._atomsstate_instance = AtomsState(
                         chemical_symbol=Quantity(
-                            type=Enum.chemical_symbol,
+                            type='',  # TODO: what to set here?
                             description="""
                             Symbol for non-atom particles or ghost atoms that can have
                             `chemical_symbol='X'`
