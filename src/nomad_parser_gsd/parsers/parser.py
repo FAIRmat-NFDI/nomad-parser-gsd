@@ -14,15 +14,17 @@ if TYPE_CHECKING:
     )
 
 from ase.symbols import symbols2numbers
-from ase.utils import formula_hill
+from ase.utils import (
+    formula_hill,
+)  # TODO: use to generate chemical formula if symbols2numbers is True?
 from collections import defaultdict
+from nomad_simulations.schema_packages.atoms_state import AtomsState
 import nomad_simulations.schema_packages.properties.energies as energy_module
 import nomad_simulations.schema_packages.properties.forces as force_module
 import numpy as np
 
-# from nomad.parsing.parser import MatchingParser
 import structlog
-from atomisticparsers.utils import MDParser
+from nomad_parser_gsd.parsers.mdparserutils import MDParser
 from nomad.config import config
 from nomad.datamodel.metainfo.workflow import Workflow
 from nomad.parsing.file_parser import FileParser
@@ -549,7 +551,7 @@ class GSDParser(MDParser):
             atoms_dict['atomic_cell'][key] = atoms_dict.pop(key)
 
         # ! MDParser.parse_trajectory_step doesn't work for the new schema, cloning function.
-        # self.parse_trajectory_step({'atoms': atoms_dict})
+        self.parse_trajectory_step(atoms_dict, simulation)
 
         # TODO: parse and store topology in every step to accomodate time-dependent topologies
         # if topology:
