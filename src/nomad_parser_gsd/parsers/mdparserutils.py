@@ -154,26 +154,40 @@ class MDParser(Parser):
             atomic_cell = AtomicCell()
 
         class AtomsStateWrapper:
-            def __init__(self, label, fallback_value=0):
+            def __init__(self, label):
                 try:
                     # Try to initialize AtomsState with the provided atom label
-                    self._atomsstate_instance = AtomsState(chemical_symbol=label)
+                    self._atomsstate_instance = AtomsState(chemical_symbol=Enum(label))
                 except ValueError:
-                    # If a ValueError is raised, return the provided label
+                    # If a ValueError is raised, add the 'ghost' label as chemical symbol
                     print(AtomsState.chemical_symbol.__dict__)
 
-                    # if not hasattr(Enum, label):
-                    #     Enum.label = label
-                    #         return Enum.label
-                    Enum.DEFAULT = label  # ? Enum class defined without default value?
-                    self._atomsstate_instance = AtomsState(
-                        chemical_symbol=Quantity(
-                            type='',  # TODO: what to set here?
-                            description="""
-                            Symbol for non-atom particles or ghost atoms that can have
-                            `chemical_symbol='X'`
-                            """,
-                        )
+                    if not hasattr(
+                        Enum, label
+                    ):  # ? Enum class defined without default value?
+                        Enum.type = label
+
+                    # self._atomsstate_instance = AtomsState(
+                    #     chemical_symbol=Quantity(
+                    #         type=Enum.type,  # TODO: what to set here?
+                    #         description="""
+                    #         Symbol for non-atom particles or ghost atoms that can have
+                    #         `chemical_symbol='X'`
+                    #         """,
+                    #     )
+                    # )
+
+                    self._atomsstate_instance = AtomsState.chemical_symbol.__dict__[
+                        'type'
+                    ] = Enum.type
+
+                    self._atomsstate_instance = AtomsState.chemical_symbol.__dict__[
+                        'description'
+                    ] = (
+                        """
+                        Symbol for non-atom particles or ghost atoms that can have
+                        `chemical_symbol='X'`
+                        """,
                     )
 
             def __getattr__(self, attr):
