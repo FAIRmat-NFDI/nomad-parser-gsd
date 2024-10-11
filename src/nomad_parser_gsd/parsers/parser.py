@@ -18,12 +18,14 @@ from ase.utils import (
     formula_hill,
 )  # TODO: use to generate chemical formula if symbols2numbers is True?
 from collections import defaultdict
-from nomad_simulations.schema_packages.atoms_state import AtomsState
+
+# from nomad_simulations.schema_packages.particles_state import ParticlesState
 import nomad_simulations.schema_packages.properties.energies as energy_module
 import nomad_simulations.schema_packages.properties.forces as force_module
 import numpy as np
 
 import structlog
+
 from nomad_parser_gsd.parsers.mdparserutils import MDParser
 from nomad.config import config
 from nomad.datamodel.metainfo.workflow import Workflow
@@ -421,10 +423,21 @@ class GSDParser(MDParser):
                 self._system_info[section][key] = (
                     self._particle_data_dict[gsd_key] if gsd_key is not None else None
                 )
+
+        def convert_tilt_to_angle(box):
+            """
+            Converts the tilt factors to angles in degrees.
+            """
+            xy = box[3]
+
+            return box
+
         # Get step and box attributes from configurations chunk of GSD file:
         for key, gsd_key in self._nomad_to_box_group_map.items():
             section = info_keys[key]
             _values_dict = get_value('configuration', path=_path, frame=frame)
+            if gsd_key == '_box':
+                _values_dict[gsd_key] = convert_tilt_to_angle(_values_dict[gsd_key])
             if isinstance(section, list):
                 for sec in section:
                     self._system_info[sec][key] = (
@@ -494,9 +507,9 @@ class GSDParser(MDParser):
         #         )
 
     def parse_system(self, simulation, frame_idx=None, frame=None):
-        atoms_dict = self._system_info.get('system')
+        particles_dict = self._system_info.get('system')
         _path = f'{frame_idx}'
-        if not atoms_dict:
+        if not particles_dict:
             self.logger.error('No particle information found in GSD file.')
             return
 
@@ -508,28 +521,28 @@ class GSDParser(MDParser):
                 'Only the topology of the first frame will be stored, '
                 'grand canonical simulations are currently not supported.'
             )
-            atoms_dict['is_representative'] = True
+            particles_dict['is_representative'] = True
             self._first_frame = False
         else:
-            atoms_dict['is_representative'] = False
+            particles_dict['is_representative'] = False
         topology = self._connectivity['particles_group']
 
-        atom_labels = atoms_dict.get('labels')
+        atom_labels = particles_dict.get('labels')
         if atom_labels is not None:
             try:
                 symbols2numbers(atom_labels)
-                atoms_dict['labels'] = atom_labels
+                particles_dict['labels'] = atom_labels
             except KeyError:  # TODO this check should be moved to the system normalizer in the new schema
-                atoms_dict['labels'] = ['X'] * len(atom_labels)
+                particles_dict['labels'] = ['X'] * len(atom_labels)
 
         bond_dict = self._data_parser.get(f'{frame_idx}.bonds', frame=frame).__dict__
-        atoms_dict['bond_list'] = bond_dict['group']
+        particles_dict['bond_list'] = bond_dict['group']
 
         # ! Natively, no time step stored in GSD file. Copy frame index instead,
         # ! alert user to missing information.
-        time = atoms_dict.pop('step')
+        time = particles_dict.pop('step')
         time_unit = time.units if hasattr(time, 'units') else None
-        atoms_dict['time_step'] = time.magnitude if time_unit is not None else time
+        particles_dict['time_step'] = time.magnitude if time_unit is not None else time
         if time_unit is None:
             self.logger.warning(
                 'No magnitude and unit information provided for the '
@@ -537,8 +550,8 @@ class GSDParser(MDParser):
             )
 
         # REMAP some of the data for the schema
-        atoms_dict['branch_label'] = f'System {time}'
-        atomic_cell_keys = [
+        particles_dict['branch_label'] = f'System {time}'
+        particle_cell_keys = [
             'n_atoms',
             'lattice_vectors',
             'periodic_boundary_conditions',
@@ -546,12 +559,12 @@ class GSDParser(MDParser):
             'velocities',
             'labels',
         ]
-        atoms_dict['atomic_cell'] = {}
-        for key in atomic_cell_keys:
-            atoms_dict['atomic_cell'][key] = atoms_dict.pop(key)
+        particles_dict['particle_cell'] = {}
+        for key in particle_cell_keys:
+            particles_dict['particle_cell'][key] = particles_dict.pop(key)
 
         # ! MDParser.parse_trajectory_step doesn't work for the new schema, cloning function.
-        self.parse_trajectory_step(atoms_dict, simulation)
+        # self.parse_trajectory_step(particles_dict, simulation)
 
         # TODO: parse and store topology in every step to accomodate time-dependent topologies
         # if topology:

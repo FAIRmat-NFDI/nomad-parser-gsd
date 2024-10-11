@@ -17,19 +17,32 @@
 # limitations under the License.
 #
 
+from collections.abc import Iterable
 from enum import Enum
 from typing import Any, Dict, List, Union
+import importlib.util
+import sys
 import numpy as np
-from collections.abc import Iterable
-
-from nomad.utils import get_logger
-from nomad.metainfo import MSection, MEnum, SubSection, Quantity
+from nomad.metainfo import MEnum, MSection, Quantity, SubSection
 from nomad.parsing.file_parser import Parser
-from runschema.run import Run
-from runschema.system import System
-from runschema.calculation import Calculation
-from runschema.method import Interaction, Model
-from simulationworkflowschema import MolecularDynamics
+from nomad.utils import get_logger
+from nomad_simulations.schema_packages.atoms_state import AtomsState
+from nomad_simulations.schema_packages.general import Simulation
+
+from nomad_simulations.schema_packages.particles_state import ParticlesState
+# spec = importlib.util.spec_from_file_location(
+#     'particles_state',
+#     '/home/bmohr/software/nomad-simulations/src/nomad_simulations/schema_packages/particles_state.py',
+# )
+# ps = importlib.util.module_from_spec(spec)
+# sys.modules['module.name'] = ps
+# spec.loader.exec_module(ps)
+
+from nomad_simulations.schema_packages.model_system import (
+    AtomicCell,
+    ModelSystem,
+    ParticleCell,
+)
 
 # nomad-simulations
 from nomad_simulations.schema_packages.outputs import (
@@ -39,9 +52,11 @@ from nomad_simulations.schema_packages.outputs import (
 )
 from nomad_simulations.schema_packages.properties.energies import EnergyContribution
 from nomad_simulations.schema_packages.properties.forces import ForceContribution
-from nomad_simulations.schema_packages.general import Simulation
-from nomad_simulations.schema_packages.atoms_state import AtomsState
-from nomad_simulations.schema_packages.model_system import AtomicCell, ModelSystem
+from runschema.calculation import Calculation
+from runschema.method import Interaction, Model
+from runschema.run import Run
+from runschema.system import System
+from simulationworkflowschema.molecular_dynamics import MolecularDynamics
 
 
 class MDParser(Parser):
@@ -138,7 +153,7 @@ class MDParser(Parser):
         data: Dict[str, Any],
         simulation: Simulation,
         model_system: ModelSystem = None,
-        atomic_cell: AtomicCell = None,
+        simulation_cell: AtomicCell = None,
     ) -> None:
         """
         Create a system section and write the provided data.
@@ -148,64 +163,33 @@ class MDParser(Parser):
 
         if (step := data.get('step')) is not None and step not in self.trajectory_steps:
             return
+
+        # Check if parsed system is in coarse-grained representation
+        is_cg = False
+        if 'particle_cell' in data.keys():
+            is_cg = True
+
         if model_system is None:
             model_system = ModelSystem()
-        if atomic_cell is None:
-            atomic_cell = AtomicCell()
 
-        class AtomsStateWrapper:
-            def __init__(self, label):
-                try:
-                    # Try to initialize AtomsState with the provided atom label
-                    self._atomsstate_instance = AtomsState(chemical_symbol=Enum(label))
-                except ValueError:
-                    # If a ValueError is raised, add the 'ghost' label as chemical symbol
-                    print(AtomsState.chemical_symbol.__dict__)
+        if simulation_cell is None:
+            if is_cg:
+                simulation_cell = ParticleCell()
+            else:
+                simulation_cell = AtomicCell()
 
-                    if not hasattr(
-                        Enum, label
-                    ):  # ? Enum class defined without default value?
-                        Enum.type = label
-
-                    # self._atomsstate_instance = AtomsState(
-                    #     chemical_symbol=Quantity(
-                    #         type=Enum.type,  # TODO: what to set here?
-                    #         description="""
-                    #         Symbol for non-atom particles or ghost atoms that can have
-                    #         `chemical_symbol='X'`
-                    #         """,
-                    #     )
-                    # )
-
-                    self._atomsstate_instance = AtomsState.chemical_symbol.__dict__[
-                        'type'
-                    ] = Enum.type
-
-                    self._atomsstate_instance = AtomsState.chemical_symbol.__dict__[
-                        'description'
-                    ] = (
-                        """
-                        Symbol for non-atom particles or ghost atoms that can have
-                        `chemical_symbol='X'`
-                        """,
-                    )
-
-            def __getattr__(self, attr):
-                # Delegate attribute access to the wrapped AtomsState instance
-                return getattr(self._atomsstate_instance, attr)
-
-            def __repr__(self):
-                return repr(self._atomsstate_instance)
-
-        atomic_cell_dict = data.pop('atomic_cell')
-        atom_labels = atomic_cell_dict.pop('labels')
-        for label in atom_labels:
-            atoms_state = AtomsStateWrapper(
-                label
-            )  # ? how can I customize AtomsState within the parser?
-            atomic_cell.atoms_state.append(atoms_state)
-        self.parse_section(atomic_cell_dict, atomic_cell)
-        model_system.cell.append(atomic_cell)
+        simulation_cell_dict = data.pop('atomic_cell')
+        type_labels = simulation_cell_dict.pop('labels')
+        if is_cg:
+            for label in type_labels:
+                atoms_state = ParticlesState(label)
+                simulation_cell.particles_state.append(atoms_state)
+        else:
+            for label in type_labels:
+                atoms_state = AtomsState(label)
+                simulation_cell.atoms_state.append(atoms_state)
+        self.parse_section(simulation_cell_dict, simulation_cell)
+        model_system.cell.append(simulation_cell)
         self.parse_section(data, model_system)
         simulation.model_system.append(model_system)
 
