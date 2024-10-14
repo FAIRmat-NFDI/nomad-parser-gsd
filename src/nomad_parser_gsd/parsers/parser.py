@@ -19,7 +19,7 @@ from ase.utils import (
 )  # TODO: use to generate chemical formula if symbols2numbers is True?
 from collections import defaultdict
 
-# from nomad_simulations.schema_packages.particles_state import ParticlesState
+from nomad_simulations.schema_packages.particles_state import ParticlesState
 import nomad_simulations.schema_packages.properties.energies as energy_module
 import nomad_simulations.schema_packages.properties.forces as force_module
 import numpy as np
@@ -426,9 +426,26 @@ class GSDParser(MDParser):
 
         def convert_tilt_to_angle(box):
             """
-            Converts the tilt factors to angles in degrees.
+            Converts the tilt factors xy, xz, yz of the lattice vectors a_1, a_2, a_3 to
+            angles in degrees.
+            Changing box vector entries to format expected by ase.cell.Cell.
+            Definition: https://hoomd-blue.readthedocs.io/en/v4.8.2/package-hoomd.html#hoomd.Box
+            - a_1 is parallel to the unit vector e_x = (1, 0, 0)
+            - xy describes the tilt of a_2 with respect to a_1
+            - xz and yz describe the tilt of a_3 with respect to a_1 and a_2
             """
-            xy = box[3]
+            xy, xz, yz = box[3], box[4], box[5]
+
+            cos_gamma = xy / np.sqrt(1 + np.power(xy, 2))
+            cos_beta = xz / np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
+            cos_alpha = (xy * xz + yz) / (
+                np.sqrt(1 + np.power(xy, 2))
+                * np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
+            )
+
+            box[3] = np.degrees(np.arccos(cos_alpha))
+            box[4] = np.degrees(np.arccos(cos_beta))
+            box[5] = np.degrees(np.arccos(cos_gamma))
 
             return box
 
@@ -508,6 +525,7 @@ class GSDParser(MDParser):
 
     def parse_system(self, simulation, frame_idx=None, frame=None):
         particles_dict = self._system_info.get('system')
+        print(particles_dict.keys())
         _path = f'{frame_idx}'
         if not particles_dict:
             self.logger.error('No particle information found in GSD file.')
@@ -525,15 +543,9 @@ class GSDParser(MDParser):
             self._first_frame = False
         else:
             particles_dict['is_representative'] = False
-        topology = self._connectivity['particles_group']
 
-        atom_labels = particles_dict.get('labels')
-        if atom_labels is not None:
-            try:
-                symbols2numbers(atom_labels)
-                particles_dict['labels'] = atom_labels
-            except KeyError:  # TODO this check should be moved to the system normalizer in the new schema
-                particles_dict['labels'] = ['X'] * len(atom_labels)
+        topology = self._connectivity['particles_group']
+        particles_dict['labels'] = particles_dict.get('labels')
 
         bond_dict = self._data_parser.get(f'{frame_idx}.bonds', frame=frame).__dict__
         particles_dict['bond_list'] = bond_dict['group']
@@ -561,10 +573,16 @@ class GSDParser(MDParser):
         ]
         particles_dict['particle_cell'] = {}
         for key in particle_cell_keys:
-            particles_dict['particle_cell'][key] = particles_dict.pop(key)
+            # HOOMD-Blue assumes periodic boundary conditions by default:
+            # https://hoomd-blue.readthedocs.io/en/v4.8.2/package-hoomd.html#hoomd.Box.periodic
+            if key == 'periodic_boundary_conditions':
+                particles_dict.pop(key)
+                particles_dict['particle_cell'][key] = [True] * 3
+            else:
+                particles_dict['particle_cell'][key] = particles_dict.pop(key)
 
-        # ! MDParser.parse_trajectory_step doesn't work for the new schema, cloning function.
-        # self.parse_trajectory_step(particles_dict, simulation)
+        # ! MDParser.parse_trajectory_step doesn't work for the new schema, extending function.
+        self.parse_trajectory_step(particles_dict, simulation)
 
         # TODO: parse and store topology in every step to accomodate time-dependent topologies
         # if topology:

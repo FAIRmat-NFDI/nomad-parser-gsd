@@ -175,14 +175,16 @@ class MDParser(Parser):
         if simulation_cell is None:
             if is_cg:
                 simulation_cell = ParticleCell()
+                simulation_cell_dict = data.pop('particle_cell')
             else:
                 simulation_cell = AtomicCell()
+                simulation_cell_dict = data.pop('atomic_cell')
 
-        simulation_cell_dict = data.pop('atomic_cell')
         type_labels = simulation_cell_dict.pop('labels')
         if is_cg:
             for label in type_labels:
-                atoms_state = ParticlesState(label)
+                print(label, type(label))
+                atoms_state = ParticlesState(particle_type=label)
                 simulation_cell.particles_state.append(atoms_state)
         else:
             for label in type_labels:
