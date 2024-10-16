@@ -183,7 +183,6 @@ class MDParser(Parser):
         type_labels = simulation_cell_dict.pop('labels')
         if is_cg:
             for label in type_labels:
-                print(label, type(label))
                 atoms_state = ParticlesState(particle_type=label)
                 simulation_cell.particles_state.append(atoms_state)
         else:

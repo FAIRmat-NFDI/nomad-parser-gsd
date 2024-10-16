@@ -424,37 +424,83 @@ class GSDParser(MDParser):
                     self._particle_data_dict[gsd_key] if gsd_key is not None else None
                 )
 
-        def convert_tilt_to_angle(box):
+        def box_to_matrix_converter(box):
             """
-            Converts the tilt factors xy, xz, yz of the lattice vectors a_1, a_2, a_3 to
-            angles in degrees.
-            Changing box vector entries to format expected by ase.cell.Cell.
+            Converts the lattice vectors from lengths and angles to a triclinic matrix
+            expected by Nomad.
             Definition: https://hoomd-blue.readthedocs.io/en/v4.8.2/package-hoomd.html#hoomd.Box
             - a_1 is parallel to the unit vector e_x = (1, 0, 0)
             - xy describes the tilt of a_2 with respect to a_1
             - xz and yz describe the tilt of a_3 with respect to a_1 and a_2
             """
-            xy, xz, yz = box[3], box[4], box[5]
 
-            cos_gamma = xy / np.sqrt(1 + np.power(xy, 2))
-            cos_beta = xz / np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
-            cos_alpha = (xy * xz + yz) / (
-                np.sqrt(1 + np.power(xy, 2))
-                * np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
-            )
+            def invalid_angles(xy, xz, yz):
+                """
+                The volume discriminant of a triclinic box is only negative or zero
+                for triplets of box angles that lead to an invalid box shape
+                (i.e., the sum of any two angles is less than or equal to the third).
+                """
 
-            box[3] = np.degrees(np.arccos(cos_alpha))
-            box[4] = np.degrees(np.arccos(cos_beta))
-            box[5] = np.degrees(np.arccos(cos_gamma))
+                # Calculate cosines of the angles
+                cos_gamma = xy / np.sqrt(1 + np.power(xy, 2))
+                cos_beta = xz / np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
+                cos_alpha = (xy * xz + yz) / (
+                    np.sqrt(1 + np.power(xy, 2))
+                    * np.sqrt(1 + np.power(xz, 2) + np.power(yz, 2))
+                )
 
-            return box
+                # Convert cosines to angles in degrees
+                gamma = np.degrees(np.arccos(cos_gamma))
+                beta = np.degrees(np.arccos(cos_beta))
+                alpha = np.degrees(np.arccos(cos_alpha))
+
+                return not (
+                    (alpha + beta > gamma)
+                    or (alpha + gamma > beta)
+                    or (beta + gamma > alpha)
+                )
+
+            if not (
+                np.all(box[:2] > 0.0)
+                and box[2] >= 0.0  # Third length can be zero for 2D systems
+            ):
+                # invalid box dimensions, return zero vectors:
+                self.logger.warning(
+                    f'Invalid box lengths: Required Lx, Ly > 0.0 and Lz >= 0.0. \
+                        Found Lx = {box[0]}, Ly = {box[1]}, Lz = {box[2]}.'
+                )
+                return np.zeros((3, 3), dtype=np.float64)
+            elif box[3] == box[4] == box[5] == 0.0:
+                # box is orthogonal, return a diagonal matrix:
+                return np.diag(box[:3].astype(np.float64, copy=False))
+            else:
+                # box is triclinic, convert to matrix:
+                Lx, Ly, Lz, xy, xz, yz = box[0], box[1], box[2], box[3], box[4], box[5]
+                box = np.zeros((3, 3), dtype=np.float64)
+
+                if invalid_angles(xy, xz, yz):
+                    # invalid box shape, return zero vectors:
+                    self.logger.warning(
+                        f'The tilt factors xy = {xy}, xz = {xz}, yz = {yz} do \
+                            not satisfy the volume condition for a triclinic box.'
+                    )
+                    return np.zeros((3, 3), dtype=np.float64)
+
+                box[0, 0] = Lx
+                box[1, 0] = xy * Ly
+                box[1, 1] = Ly
+                box[2, 0] = xz * Lz
+                box[2, 1] = yz * Lz
+                box[2, 2] = Lz
+
+                return box.astype(np.float64, copy=False)
 
         # Get step and box attributes from configurations chunk of GSD file:
         for key, gsd_key in self._nomad_to_box_group_map.items():
             section = info_keys[key]
             _values_dict = get_value('configuration', path=_path, frame=frame)
             if gsd_key == '_box':
-                _values_dict[gsd_key] = convert_tilt_to_angle(_values_dict[gsd_key])
+                _values_dict[gsd_key] = box_to_matrix_converter(_values_dict[gsd_key])
             if isinstance(section, list):
                 for sec in section:
                     self._system_info[sec][key] = (
