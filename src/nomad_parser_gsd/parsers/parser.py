@@ -144,6 +144,16 @@ class GSDParser(MDParser):
             'dimensionality': 'dimensions',
         }
 
+    def enforce_array_data_type(self, value):
+        if isinstance(value, np.ndarray):
+            if np.issubdtype(value.dtype, np.integer):
+                # Handle all integer types (int32, uint32, etc.) as int32
+                value = np.asarray(value, dtype=np.int32)
+            elif np.issubdtype(value.dtype, np.floating):
+                # Handle all floating-point types as float64
+                value = np.asarray(value, dtype=np.float64)
+        return value
+
     # Load GSD file as file layer object to access generating program name and version.
     def get_program_info(self):
         _file_layer = gsdfl.open(name=self.mainfile, mode='r')
@@ -344,7 +354,7 @@ class GSDParser(MDParser):
 
         return _connectivity
 
-    def get_system_info(self, frame_idx=None, frame=None):
+    def get_system_info(self, frame_idx: int = None, frame=None) -> dict[str, dict]:
         self._system_info = {'system': dict(), 'outputs': dict()}
         _path = f'{frame_idx}'
         _interaction_types = [
@@ -412,17 +422,12 @@ class GSDParser(MDParser):
         # Get quantities from particles chunk of GSD file
         for key, gsd_key in self._nomad_to_particles_group_map.items():
             section = info_keys[key]
+            value = self._particle_data_dict[gsd_key] if gsd_key is not None else None
             if isinstance(section, list):
                 for sec in section:
-                    self._system_info[sec][key] = (
-                        self._particle_data_dict[gsd_key]
-                        if gsd_key is not None
-                        else None
-                    )
+                    self._system_info[sec][key] = self.enforce_array_data_type(value)
             else:
-                self._system_info[section][key] = (
-                    self._particle_data_dict[gsd_key] if gsd_key is not None else None
-                )
+                self._system_info[section][key] = self.enforce_array_data_type(value)
 
         def box_to_matrix_converter(box):
             """
@@ -571,7 +576,6 @@ class GSDParser(MDParser):
 
     def parse_system(self, simulation, frame_idx=None, frame=None):
         particles_dict = self._system_info.get('system')
-        print(particles_dict.keys())
         _path = f'{frame_idx}'
         if not particles_dict:
             self.logger.error('No particle information found in GSD file.')
@@ -594,7 +598,7 @@ class GSDParser(MDParser):
         particles_dict['labels'] = particles_dict.get('labels')
 
         bond_dict = self._data_parser.get(f'{frame_idx}.bonds', frame=frame).__dict__
-        particles_dict['bond_list'] = bond_dict['group']
+        particles_dict['bond_list'] = self.enforce_array_data_type(bond_dict['group'])
 
         # ! Natively, no time step stored in GSD file. Copy frame index instead,
         # ! alert user to missing information.
